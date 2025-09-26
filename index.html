@@ -3,11 +3,11 @@
 <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width,initial-scale=1"/>
-    <title>Yandex Geocoder → MapLibre</title>
+    <title>Геокодер списка адресов с помощью геокодера Яндекс</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css"/>
     <style>
         :root {
-            --gap: 12px;
+            --gap: 10px;
             --panel-w: calc(max(50%, 450px));
         }
 
@@ -33,6 +33,7 @@
             gap: 10px;
             height: 100%;
             overflow-y: auto;
+            padding: 2px;
         }
 
         label {
@@ -40,7 +41,7 @@
             color: #333;
         }
 
-        input[type=text], textarea {
+        input[type=password], textarea {
             width: 100%;
             box-sizing: border-box;
             padding: 8px;
@@ -55,11 +56,11 @@
             font-family: monospace;
         }
 
-        button {
+        button:not(.maplibregl-popup-close-button) {
             padding: 10px 12px;
             border-radius: 8px;
             border: 0;
-            background: #2563eb;
+            background: #4678e5;
             color: #fff;
             font-weight: 600;
             cursor: pointer;
@@ -112,11 +113,26 @@
             cursor: pointer;
         }
 
-        .footer {
-            margin-top: auto;
-            font-size: 12px;
-            color: #666;
+        .result-item:hover {
+            background: #e2e8f0;
         }
+
+        .copied {
+            background-color: rgba(9, 238, 9, 0.6);
+            transition: all 0.3s;
+        }
+
+        .was-copied {
+            background-color: initial;
+            transition: all 0.3s;
+        }
+
+        .download-buttons {
+            margin-left: auto;
+            display: flex;
+            gap: 8px;
+        }
+
 
         @media (max-width: 800px) {
             .app {
@@ -144,15 +160,24 @@
 <body>
 <div class="app">
     <div class="panel">
-        <label for="apiKey">API key Yandex Geocoder (<a href="https://developer.tech.yandex.ru/services" target="_blank">получить</a>)</label>
-        <input id="apiKey" type="text" placeholder="YOUR_API_KEY"/>
+        <label for="apiKey">API-ключ от HTTP геокодера Яндекса (<a href="https://developer.tech.yandex.ru/services"
+                                                                   target="_blank">получить</a>)</label>
+        <input id="apiKey" type="password" placeholder="YOUR_API_KEY"/>
 
-        <label for="addresses">Список адресов (по одному на строку)</label>
-        <textarea id="addresses" placeholder="Например:\nбул Мухаммед Бин Рашид, дом 1\nКрасная площадь, Москва"></textarea>
+        <label for="addresses">Список адресов (результаты кешируются до перезагрузки страницы)</label>
+        <textarea id="addresses" placeholder="СПБ, Кронверкский проспект 49
+Долгопрудный, Лётная улица, 7
+...
+"></textarea>
 
         <div class="controls-row">
             <button id="run">Геокодировать</button>
             <button id="clear">Очистить маркеры</button>
+            <div class="download-buttons">
+                <button id="downloadCsv">CSV</button>
+                <button id="downloadGeoJSON">GeoJSON</button>
+                <button id="downloadKML">KML</button>
+            </div>
         </div>
 
         <div style="display:flex;gap:8px;align-items:center">
@@ -187,7 +212,7 @@
             },
             layers: [{id: 'raster-tiles', type: 'raster', source: 'raster_tiles'}]
         },
-        center: [37.618423, 55.751244],
+        center: [60, 60],
         zoom: 3
     });
 
@@ -220,24 +245,70 @@
         if (cache.has(address)) return cache.get(address);
         const base = 'https://geocode-maps.yandex.ru/v1/';
         const url = base + '?apikey=' + encodeURIComponent(apiKey) + '&geocode=' + encodeURIComponent(address) + '&format=json';
-        const resp = await fetch(url);
+        const resp = await fetch(url, { referrerPolicy: 'no-referrer' });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const json = await resp.json();
         cache.set(address, json);
         return json;
     }
 
+    let largeMarker = null;
+    const copyBtnSvg =
+        '<svg title = "скопировать координаты" style = "top: 3px; margin: 1px; position: relative;" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-file-icon lucide-file">' +
+        '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>' +
+        '<path d="M14 2v4a2 2 0 0 0 2 2h4"/>' +
+        '</svg>'
+
+    function copyAnimation(elem) {
+        elem.classList.add("copied")
+        setTimeout(() => {
+            elem.classList.replace("copied", "was-copied")
+            setTimeout(() => elem.classList.remove("was-copied"), 300)
+        }, 300)
+    }
+
     function addResultItem(title, text, coords) {
         const el = document.createElement('div');
         el.className = 'result-item';
         el.title = "Нажмите, чтобы при приблизить"
-        el.innerHTML = `<strong>${escapeHtml(title)}</strong><div style="font-size:12px;color:#444;margin-top:4px;">${escapeHtml(text)}</div>`;
+        el.innerHTML = `<strong>${escapeHtml(title)}</strong><br/><code class="coords" style="font-size:12px;color:#444;margin-top:4px;">${escapeHtml(text)}${copyBtnSvg}</code>`;
         if (coords) {
             el.addEventListener('click', () => {
-                map.flyTo({center: coords, zoom: 15});
+                map.flyTo({center: coords, zoom: 16});
+            });
+
+            el.addEventListener('mouseenter', () => {
+                if (largeMarker) {
+                    largeMarker.remove();
+                    largeMarker = null;
+                }
+                const bigEl = document.createElement('div');
+                bigEl.style.width = '32px';
+                bigEl.style.height = '32px';
+                bigEl.style.borderRadius = '50%';
+                bigEl.style.background = 'red';
+                bigEl.style.border = '3px solid #fff';
+                bigEl.style.boxShadow = '0 0 8px black';
+                largeMarker = new maplibregl.Marker({element: bigEl})
+                    .setLngLat(coords)
+                    .addTo(map);
+            });
+
+            el.addEventListener('mouseleave', () => {
+                if (largeMarker) {
+                    largeMarker.remove();
+                    largeMarker = null;
+                }
             });
         }
-        $results.prepend(el);
+
+        const coordsEl = el.querySelector(".coords")
+        coordsEl.onclick = e => {
+            e.stopPropagation()
+            copyAnimation(coordsEl)
+            navigator.clipboard.writeText(text)
+        }
+        $results.appendChild(el);
     }
 
     function escapeHtml(s) {
@@ -250,18 +321,39 @@
         })[c]);
     }
 
+    function makePopupContent(origAddress, lon, lat) {
+        const yandexLink = `https://yandex.ru/maps/?whatshere[point]=${lon},${lat}&whatshere[zoom]=17`;
+        const googleLink = `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+        const twoGisLink = `https://2gis.ru/?m=${lon}%2C${lat}%2F${17}`;
+
+        return `
+        <div style="min-width:260px;max-width:520px;font-size:13px;line-height:1.3">
+          <div style="font-weight:700;margin-bottom:6px">${escapeHtml(origAddress)}</div>
+          <div onclick="const code = this.querySelector('code');  copyAnimation(code); navigator.clipboard.writeText(code.textContent)" style="cursor:pointer; margin-bottom:6px"><code>${lat.toFixed(6)}, ${lon.toFixed(6)}</code>${copyBtnSvg}</div>
+          <div style="display:flex;gap:8px;margin-bottom:6px">
+            <a href="${yandexLink}" target="_blank" rel="noreferrer">Yandex</a>
+            <a href="${twoGisLink}" target="_blank" rel="noreferrer">2GIS</a>
+            <a href="${googleLink}" target="_blank" rel="noreferrer">Google</a>
+          </div>
+        </div>
+      `;
+    }
+
     function addMarker(lon, lat, title, raw) {
         const popup = new maplibregl.Popup({
             offset: 12,
             maxWidth: '600px'
-        }).setHTML(`<strong>${escapeHtml(title)}</strong><pre style="max-width:560px;white-space:pre-wrap;font-size:12px;">${escapeHtml(JSON.stringify(raw, null, 2))}</pre>`);
+        }).setHTML(makePopupContent(title, lon, lat));
         const el = document.createElement('div');
         el.style.width = '18px';
         el.style.height = '18px';
         el.style.borderRadius = '50%';
         el.style.background = '#ef4444';
-        // el.style.boxShadow = '0 0 0 4px rgba(239,68,68,0.16)';
-        const marker = new maplibregl.Marker({element: el}).setLngLat([lon, lat]).setPopup(popup).addTo(map);
+        el.style.cursor = 'pointer';
+        const marker = new maplibregl
+            .Marker({element: el})
+            .setLngLat([lon, lat])
+            .setPopup(popup).addTo(map);
         markers.push(marker);
         return marker;
     }
@@ -269,11 +361,11 @@
     async function runGeocode() {
         const apiKey = $apiKey.value.trim();
         if (!apiKey) {
-            alert('Укажите API key Yandex Geocoder');
+            alert('Укажите API-ключ геокодера');
             return;
         }
-        const lines = $addresses.value.split('\n').map(s => s.trim()).filter(Boolean);
-        if (lines.length === 0) {
+        const addresesLines = $addresses.value.split('\n').map(s => s.trim()).filter(Boolean);
+        if (addresesLines.length === 0) {
             alert('Введите хотя бы один адрес');
             return;
         }
@@ -282,13 +374,13 @@
         $clear.disabled = true;
         $results.innerHTML = '';
 
-        const total = lines.length;
+        const total = addresesLines.length;
         let done = 0;
         resetProgress();
 
         const bounds = new maplibregl.LngLatBounds();
 
-        for (const addr of lines) {
+        for (const addr of addresesLines) {
             try {
                 const json = await geocodeAddress(apiKey, addr);
                 const fm = json?.response?.GeoObjectCollection?.featureMember;
@@ -322,7 +414,7 @@
         }
 
         if (!bounds.isEmpty()) {
-            map.fitBounds(bounds, {padding: 40});
+            map.fitBounds(bounds, {padding: 40, maxZoom: 17});
         }
 
         $run.disabled = false;
@@ -330,6 +422,142 @@
     }
 
     $run.addEventListener('click', runGeocode);
+
+    async function downloadCsv() {
+        const csvLines = [];
+        csvLines.push('addr;lat;lon');
+
+        const apiKey = $apiKey.value.trim();
+        const addressLines = $addresses.value.split('\n').map(s => s.trim()).filter(Boolean);
+
+        for (const addr of addressLines) {
+            const json = await geocodeAddress(apiKey, addr);
+            const fm = json?.response?.GeoObjectCollection?.featureMember;
+            if (Array.isArray(fm) && fm.length > 0) {
+                const obj = fm[0].GeoObject;
+                const posText = obj?.Point?.pos || '';
+                const [lonStr, latStr] = posText.split(' ');
+                const lon = parseFloat(lonStr);
+                const lat = parseFloat(latStr);
+                const title = obj?.metaDataProperty?.GeocoderMetaData?.text || obj?.name || addr;
+
+                if (!(!Number.isFinite(lon) || !Number.isFinite(lat))) {
+                    csvLines.push(`"${title}";${lat};${lon}`);
+                }
+            }
+        }
+        const csv = csvLines.join('\n');
+        const blob = new Blob([csv], {type: 'text/csv'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'geocode_results.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    document.getElementById('downloadCsv').addEventListener('click', downloadCsv);
+
+    async function downloadGeoJSON() {
+        const apiKey = $apiKey.value.trim();
+        const addressLines = $addresses.value.split('\n').map(s => s.trim()).filter(Boolean);
+
+        const features = [];
+
+        for (const addr of addressLines) {
+            const json = await geocodeAddress(apiKey, addr);
+            const fm = json?.response?.GeoObjectCollection?.featureMember;
+            if (Array.isArray(fm) && fm.length > 0) {
+                const obj = fm[0].GeoObject;
+                const posText = obj?.Point?.pos || '';
+                const [lonStr, latStr] = posText.split(' ');
+                const lon = parseFloat(lonStr);
+                const lat = parseFloat(latStr);
+                const title = obj?.metaDataProperty?.GeocoderMetaData?.text || obj?.name || addr;
+
+                if (Number.isFinite(lon) && Number.isFinite(lat)) {
+                    features.push({
+                        type: "Feature",
+                        geometry: {
+                            type: "Point",
+                            coordinates: [lon, lat]
+                        },
+                        properties: {
+                            address: title,
+                            raw: obj
+                        }
+                    });
+                }
+            }
+        }
+
+        const geojson = {
+            type: "FeatureCollection",
+            features
+        };
+
+        const blob = new Blob([JSON.stringify(geojson, null, 2)], {type: 'application/geo+json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'geocode_results.geojson';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    document.getElementById('downloadGeoJSON').addEventListener('click', downloadGeoJSON);
+
+    async function downloadKML() {
+        const apiKey = $apiKey.value.trim();
+        const addressLines = $addresses.value.split('\n').map(s => s.trim()).filter(Boolean);
+
+        let placemarks = '';
+        for (const addr of addressLines) {
+            const json = await geocodeAddress(apiKey, addr);
+            const fm = json?.response?.GeoObjectCollection?.featureMember;
+            if (Array.isArray(fm) && fm.length > 0) {
+                const obj = fm[0].GeoObject;
+                const posText = obj?.Point?.pos || '';
+                const [lonStr, latStr] = posText.split(' ');
+                const lon = parseFloat(lonStr);
+                const lat = parseFloat(latStr);
+                const title = obj?.metaDataProperty?.GeocoderMetaData?.text || obj?.name || addr;
+
+                if (Number.isFinite(lon) && Number.isFinite(lat)) {
+                    placemarks += `
+<Placemark>
+    <name>${escapeHtml(title)}</name>
+    <Point>
+        <coordinates>${lon},${lat},0</coordinates>
+    </Point>
+</Placemark>`;
+                }
+            }
+        }
+
+        const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+${placemarks}
+</Document>
+</kml>`;
+
+        const blob = new Blob([kml], {type: 'application/vnd.google-earth.kml+xml'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'geocode_results.kml';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    document.getElementById('downloadKML').addEventListener('click', downloadKML);
 </script>
 </body>
 </html>
