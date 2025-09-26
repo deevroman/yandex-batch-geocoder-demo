@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>Yandex Geocoder → MapLibre</title>
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css"/>
+    <style>
+        :root {
+            --gap: 12px;
+            --panel-w: calc(max(50%, 450px));
+        }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+            font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+        }
+
+        .app {
+            display: flex;
+            flex-direction: row;
+            height: 100vh;
+            gap: var(--gap);
+            padding: var(--gap);
+            box-sizing: border-box;
+        }
+
+        .panel {
+            flex: 0 0 var(--panel-w);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            height: 100%;
+            overflow-y: auto;
+        }
+
+        label {
+            font-size: 13px;
+            color: #333;
+        }
+
+        input[type=text], textarea {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        textarea {
+            min-height: 150px;
+            resize: vertical;
+            font-family: monospace;
+        }
+
+        button {
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 0;
+            background: #2563eb;
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button[disabled] {
+            opacity: .6;
+            cursor: not-allowed;
+        }
+
+        .controls-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .progress-wrap {
+            background: #eee;
+            border-radius: 8px;
+            overflow: hidden;
+            height: 14px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #34d399, #10b981);
+        }
+
+        .map {
+            flex: 1;
+            border-radius: 8px;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        .results {
+            font-size: 13px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            overflow-y: auto;
+        }
+
+        .result-item {
+            padding: 6px;
+            border-radius: 6px;
+            background: #f7f7fb;
+            border: 1px solid #eee;
+            cursor: pointer;
+        }
+
+        .footer {
+            margin-top: auto;
+            font-size: 12px;
+            color: #666;
+        }
+
+        @media (max-width: 800px) {
+            .app {
+                flex-direction: column;
+            }
+
+            .panel {
+                flex: none;
+                width: 100%;
+                max-height: 58%;
+            }
+
+            .map {
+                flex: none;
+                height: 40vh;
+                margin-top: auto;
+            }
+
+            textarea {
+                min-height: 100px;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <div class="panel">
+        <label for="apiKey">API key Yandex Geocoder (<a href="https://developer.tech.yandex.ru/services" target="_blank">получить</a>)</label>
+        <input id="apiKey" type="text" placeholder="YOUR_API_KEY"/>
+
+        <label for="addresses">Список адресов (по одному на строку)</label>
+        <textarea id="addresses" placeholder="Например:\nбул Мухаммед Бин Рашид, дом 1\nКрасная площадь, Москва"></textarea>
+
+        <div class="controls-row">
+            <button id="run">Геокодировать</button>
+            <button id="clear">Очистить маркеры</button>
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:center">
+            <div style="flex:1">
+                <div class="progress-wrap" aria-hidden>
+                    <div id="progress" class="progress-bar"></div>
+                </div>
+            </div>
+            <div id="progressText" style="text-align:right;font-size:13px;color:#333">0 / 0</div>
+        </div>
+
+        <div class="results" id="results"></div>
+    </div>
+
+    <div id="map" class="map"></div>
+</div>
+<script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+<script>
+    const map = new maplibregl.Map({
+        container: 'map',
+        style: {
+            version: 8,
+            sources: {
+                raster_tiles: {
+                    type: 'raster',
+                    tiles: [
+                        'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+                    ],
+                    tileSize: 256,
+                    attribution: '© <a href="https://www.openstreetmap.org/copyright">Участники OpenStreetMap</a>'
+                }
+            },
+            layers: [{id: 'raster-tiles', type: 'raster', source: 'raster_tiles'}]
+        },
+        center: [37.618423, 55.751244],
+        zoom: 3
+    });
+
+    let markers = [];
+    let cache = new Map();
+
+    const $apiKey = document.getElementById('apiKey');
+    const $addresses = document.getElementById('addresses');
+    const $run = document.getElementById('run');
+    const $clear = document.getElementById('clear');
+    const $progress = document.getElementById('progress');
+    const $progressText = document.getElementById('progressText');
+    const $results = document.getElementById('results');
+
+
+    function resetProgress() {
+        $progress.style.width = '0%';
+        $progressText.textContent = '0 / 0';
+    }
+
+    function clearMarkers() {
+        for (const m of markers) m.remove();
+        markers = [];
+        $results.innerHTML = '';
+    }
+
+    $clear.addEventListener('click', clearMarkers);
+
+    async function geocodeAddress(apiKey, address) {
+        if (cache.has(address)) return cache.get(address);
+        const base = 'https://geocode-maps.yandex.ru/v1/';
+        const url = base + '?apikey=' + encodeURIComponent(apiKey) + '&geocode=' + encodeURIComponent(address) + '&format=json';
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const json = await resp.json();
+        cache.set(address, json);
+        return json;
+    }
+
+    function addResultItem(title, text, coords) {
+        const el = document.createElement('div');
+        el.className = 'result-item';
+        el.title = "Нажмите, чтобы при приблизить"
+        el.innerHTML = `<strong>${escapeHtml(title)}</strong><div style="font-size:12px;color:#444;margin-top:4px;">${escapeHtml(text)}</div>`;
+        if (coords) {
+            el.addEventListener('click', () => {
+                map.flyTo({center: coords, zoom: 15});
+            });
+        }
+        $results.prepend(el);
+    }
+
+    function escapeHtml(s) {
+        return (s + '').replace(/[&<>"']/g, c => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": "&#39;"
+        })[c]);
+    }
+
+    function addMarker(lon, lat, title, raw) {
+        const popup = new maplibregl.Popup({
+            offset: 12,
+            maxWidth: '600px'
+        }).setHTML(`<strong>${escapeHtml(title)}</strong><pre style="max-width:560px;white-space:pre-wrap;font-size:12px;">${escapeHtml(JSON.stringify(raw, null, 2))}</pre>`);
+        const el = document.createElement('div');
+        el.style.width = '18px';
+        el.style.height = '18px';
+        el.style.borderRadius = '50%';
+        el.style.background = '#ef4444';
+        // el.style.boxShadow = '0 0 0 4px rgba(239,68,68,0.16)';
+        const marker = new maplibregl.Marker({element: el}).setLngLat([lon, lat]).setPopup(popup).addTo(map);
+        markers.push(marker);
+        return marker;
+    }
+
+    async function runGeocode() {
+        const apiKey = $apiKey.value.trim();
+        if (!apiKey) {
+            alert('Укажите API key Yandex Geocoder');
+            return;
+        }
+        const lines = $addresses.value.split('\n').map(s => s.trim()).filter(Boolean);
+        if (lines.length === 0) {
+            alert('Введите хотя бы один адрес');
+            return;
+        }
+
+        $run.disabled = true;
+        $clear.disabled = true;
+        $results.innerHTML = '';
+
+        const total = lines.length;
+        let done = 0;
+        resetProgress();
+
+        const bounds = new maplibregl.LngLatBounds();
+
+        for (const addr of lines) {
+            try {
+                const json = await geocodeAddress(apiKey, addr);
+                const fm = json?.response?.GeoObjectCollection?.featureMember;
+                if (Array.isArray(fm) && fm.length > 0) {
+                    const obj = fm[0].GeoObject;
+                    const posText = obj?.Point?.pos || '';
+                    const [lonStr, latStr] = posText.split(' ');
+                    const lon = parseFloat(lonStr);
+                    const lat = parseFloat(latStr);
+                    const title = obj?.metaDataProperty?.GeocoderMetaData?.text || obj?.name || addr;
+
+                    if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+                        addResultItem(addr, 'Координаты не найдены');
+                    } else {
+                        addMarker(lon, lat, title, obj);
+                        addResultItem(title, `lat: ${lat.toFixed(6)}, lon: ${lon.toFixed(6)}`, [lon, lat]);
+                        bounds.extend([lon, lat]);
+                    }
+                } else {
+                    addResultItem(addr, 'Не найдено');
+                }
+            } catch (err) {
+                console.error(err);
+                addResultItem(addr, 'Ошибка: ' + err.message);
+            }
+
+            done++;
+            const pct = Math.round((done / total) * 100);
+            $progress.style.width = pct + '%';
+            $progressText.textContent = `${done} / ${total}`;
+        }
+
+        if (!bounds.isEmpty()) {
+            map.fitBounds(bounds, {padding: 40});
+        }
+
+        $run.disabled = false;
+        $clear.disabled = false;
+    }
+
+    $run.addEventListener('click', runGeocode);
+</script>
+</body>
+</html>
